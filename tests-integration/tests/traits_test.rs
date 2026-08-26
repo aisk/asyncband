@@ -16,6 +16,8 @@
 // under the License.
 
 use std::cell::Cell;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::BuildHasher;
 
 use asyncband::barrier::Barrier;
 use asyncband::condvar::Condvar;
@@ -44,6 +46,17 @@ use asyncband::waitgroup::Wait;
 use asyncband::waitgroup::WaitGroup;
 
 struct PoolManager;
+
+struct LocalBuildHasher(Cell<u64>);
+
+impl BuildHasher for LocalBuildHasher {
+    type Hasher = DefaultHasher;
+
+    fn build_hasher(&self) -> Self::Hasher {
+        self.0.set(self.0.get().wrapping_add(1));
+        DefaultHasher::new()
+    }
+}
 
 impl ManageObject for PoolManager {
     type Object = i64;
@@ -107,6 +120,15 @@ fn movable_public_types_are_send() {
     assert_send::<oneshot::Receiver<i64>>();
     assert_send::<oneshot::Recv<i64>>();
     assert_send::<pool::unbounded::Object<Cell<u8>>>();
+}
+
+#[tokio::test]
+async fn keyed_types_accept_non_sync_hashers_for_local_use() {
+    let map = OnceMap::<&str, u32, _>::with_hasher(LocalBuildHasher(Cell::new(0)));
+    assert_eq!(map.compute("key", async || 1).await, 1);
+
+    let group = singleflight::Group::<&str, u32, _>::with_hasher(LocalBuildHasher(Cell::new(0)));
+    assert_eq!(group.work("key", || async { 1 }).await, 1);
 }
 
 #[test]
