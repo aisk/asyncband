@@ -17,7 +17,7 @@
 
 //! Coordination primitives for graceful task shutdown.
 //!
-//! This module provides [`new_pair`] to create a coordinator and an initial completion guard:
+//! This module provides [`new`] to create a coordinator and an initial completion guard:
 //!
 //! * [`Shutdown`] can request shutdown and wait for all guards to be dropped.
 //! * [`ShutdownGuard`] keeps shutdown completion pending until it is dropped and can observe the
@@ -29,15 +29,17 @@
 //! request shutdown or wait for completion. [`ShutdownGuard`] is also cloneable; each clone keeps
 //! completion pending independently until it is dropped.
 //!
-//! [`Shutdown::wait`] waits until all [`ShutdownGuard`] handles have been dropped, while
-//! [`Shutdown::shutdown`] requests shutdown before waiting.
+//! Awaiting [`Shutdown`] requests shutdown and then waits until all [`ShutdownGuard`] handles have
+//! been dropped. The request is made when the future is first polled, not when the value is created
+//! or converted into a future. Call [`Shutdown::request_shutdown`] first when the request must be
+//! issued before entering a cancellable operation such as `tokio::select!`.
 //!
 //! # Examples
 //!
 //! ```
 //! # #[tokio::main]
 //! # async fn main() {
-//! let (shutdown, guard) = asyncband::shutdown::new_pair();
+//! let (shutdown, guard) = asyncband::shutdown::new();
 //!
 //! for i in 0..3 {
 //!     let guard = guard.clone();
@@ -49,13 +51,16 @@
 //! }
 //! drop(guard);
 //!
-//! shutdown.shutdown().await;
+//! shutdown.await;
 //! # }
 //! ```
 
 use std::future::Future;
 use std::future::IntoFuture;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Context;
+use std::task::Poll;
 
 use crate::latch::Latch;
 use crate::waitgroup::Wait;
@@ -64,7 +69,7 @@ use crate::waitgroup::WaitGroup;
 /// Creates a graceful shutdown coordinator and an initial completion guard.
 ///
 /// See the [module level documentation](self) for more.
-pub fn new_pair() -> (Shutdown, ShutdownGuard) {
+pub fn new() -> (Shutdown, ShutdownGuard) {
     let latch = Arc::new(Latch::new(1));
     let wg = WaitGroup::new();
     let shutdown = Shutdown {
@@ -80,7 +85,35 @@ pub fn new_pair() -> (Shutdown, ShutdownGuard) {
 
 /// Coordinates a graceful shutdown request and completion.
 ///
+/// Awaiting this handle requests shutdown and waits for every [`ShutdownGuard`] to be dropped. The
+/// request is issued on the first poll. Merely creating, moving, or dropping an unpolled handle
+/// does not request shutdown.
+///
+/// Once the handle has been polled, the shutdown request is sticky even if the future is cancelled
+/// or dropped. If shutdown must be requested before a `select` can choose another branch, call
+/// [`request_shutdown`](Self::request_shutdown) before entering the `select`:
+///
+/// ```
+/// # #[tokio::main]
+/// # async fn main() {
+/// let (shutdown, guard) = asyncband::shutdown::new();
+/// let worker = tokio::spawn(async move {
+///     guard.shutdown_requested().await;
+/// });
+///
+/// shutdown.request_shutdown();
+///
+/// tokio::select! {
+///     _ = shutdown => {}
+///     _ = std::future::pending::<()>() => {}
+/// }
+///
+/// worker.await.unwrap();
+/// # }
+/// ```
+///
 /// See the [module level documentation](self) for more.
+#[must_use = "shutdown is not requested unless this handle is polled or request_shutdown is called"]
 #[derive(Debug, Clone)]
 pub struct Shutdown {
     latch: Arc<Latch>,
@@ -95,22 +128,15 @@ impl Shutdown {
     pub fn request_shutdown(&self) {
         self.latch.count_down();
     }
+}
 
-    /// Requests shutdown and waits for all [`ShutdownGuard`] handles to be dropped.
-    ///
-    /// This is equivalent to calling [`request_shutdown`](Self::request_shutdown) followed by
-    /// [`wait`](Self::wait).
-    pub async fn shutdown(self) {
-        self.request_shutdown();
-        self.wait().await;
-    }
+impl Future for Shutdown {
+    type Output = ();
 
-    /// Waits for all [`ShutdownGuard`] handles to be dropped.
-    ///
-    /// This does not request shutdown. Other clones of this control handle can wait for the same
-    /// completion independently.
-    pub async fn wait(self) {
-        self.wait.await;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        this.request_shutdown();
+        Pin::new(&mut this.wait).poll(cx)
     }
 }
 
@@ -130,8 +156,8 @@ pub struct ShutdownGuard {
 impl ShutdownGuard {
     /// Returns a handle that observes the shutdown request without participating in completion.
     ///
-    /// The returned handle does not delay [`Shutdown::wait`], but this guard still does. Use
-    /// [`into_watch`](Self::into_watch) to stop keeping shutdown completion pending.
+    /// The returned handle does not delay shutdown completion, but this guard still does. Use
+    /// [`into_watch`](Self::into_watch) to stop keeping completion pending.
     pub fn watch(&self) -> ShutdownWatch {
         ShutdownWatch {
             latch: self.latch.clone(),

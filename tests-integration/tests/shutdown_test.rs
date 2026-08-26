@@ -24,26 +24,26 @@ use tests_integration::test_runtime;
 
 #[test]
 fn test_single_pair() {
-    let (shutdown, guard) = new_pair();
+    let (shutdown, guard) = new();
     let handle = test_runtime().spawn(async move { guard.shutdown_requested().await });
-    pollster::block_on(shutdown.shutdown());
+    pollster::block_on(shutdown);
     pollster::block_on(handle).unwrap();
 }
 
 #[test]
 fn test_multiple_tasks() {
-    let (shutdown, guard) = new_pair();
+    let (shutdown, guard) = new();
     for _i in 0..100 {
         let guard = guard.clone();
         test_runtime().spawn(async move { guard.shutdown_requested().await });
     }
     drop(guard);
-    pollster::block_on(shutdown.shutdown());
+    pollster::block_on(shutdown);
 }
 
 #[test]
 fn test_multiple_control_handles() {
-    let (shutdown, guard) = new_pair();
+    let (shutdown, guard) = new();
     for _i in 0..100 {
         let guard = guard.clone();
         test_runtime().spawn(async move { guard.shutdown_requested().await });
@@ -51,13 +51,13 @@ fn test_multiple_control_handles() {
     drop(guard);
     let shutdown_clone = shutdown.clone();
     shutdown.request_shutdown();
-    pollster::block_on(shutdown.wait());
-    pollster::block_on(shutdown_clone.wait());
+    pollster::block_on(shutdown);
+    pollster::block_on(shutdown_clone);
 }
 
 #[test]
 fn test_is_shutdown_requested() {
-    let (shutdown, guard) = new_pair();
+    let (shutdown, guard) = new();
     assert!(!guard.is_shutdown_requested());
     shutdown.request_shutdown();
     assert!(guard.is_shutdown_requested());
@@ -73,7 +73,7 @@ fn test_shutdown_requested_owned_does_not_capture_self() {
         pending::<()>().await;
     }
 
-    let (shutdown, guard) = new_pair();
+    let (shutdown, guard) = new();
     let mut state = State { guard };
     test_runtime().spawn(async move {
         let shutdown_requested = state.guard.shutdown_requested_owned();
@@ -82,54 +82,75 @@ fn test_shutdown_requested_owned_does_not_capture_self() {
             _ = run_state(&mut state) => (),
         }
     });
-    pollster::block_on(shutdown.shutdown());
+    pollster::block_on(shutdown);
 }
 
 #[test]
 fn test_watch_does_not_block_completion() {
-    let (shutdown, guard) = new_pair();
+    let (shutdown, guard) = new();
     let watch = guard.into_watch();
 
-    pollster::block_on(shutdown.shutdown());
+    pollster::block_on(shutdown);
     assert!(watch.is_shutdown_requested());
 }
 
 #[test]
-fn test_wait_does_not_request_shutdown() {
-    let (shutdown, guard) = new_pair();
+fn test_dropping_unpolled_shutdown_does_not_request_shutdown() {
+    let (shutdown, guard) = new();
     let watch = guard.watch();
-    let completion = shutdown.wait();
-    let mut completion = pin!(completion);
 
-    assert!(poll_once(completion.as_mut()).is_pending());
-    assert!(!watch.is_shutdown_requested());
-
-    drop(guard);
-    assert!(poll_once(completion.as_mut()).is_ready());
+    drop(shutdown);
     assert!(!watch.is_shutdown_requested());
 }
 
 #[test]
-fn test_shutdown_requests_and_waits_for_completion() {
-    let (shutdown, guard) = new_pair();
+fn test_polling_shutdown_requests_and_waits_for_completion() {
+    let (shutdown, guard) = new();
     let watch = guard.watch();
-    let completion = shutdown.shutdown();
-    let mut completion = pin!(completion);
+    let mut shutdown = pin!(shutdown);
 
-    assert!(poll_once(completion.as_mut()).is_pending());
+    assert!(poll_once(shutdown.as_mut()).is_pending());
     assert!(watch.is_shutdown_requested());
 
     drop(guard);
-    assert!(poll_once(completion.as_mut()).is_ready());
+    assert!(poll_once(shutdown.as_mut()).is_ready());
+}
+
+#[test]
+fn test_dropping_polled_shutdown_keeps_request_sticky() {
+    let (shutdown, guard) = new();
+    let watch = guard.watch();
+
+    {
+        let mut shutdown = pin!(shutdown);
+        assert!(poll_once(shutdown.as_mut()).is_pending());
+    }
+
+    assert!(watch.is_shutdown_requested());
+}
+
+#[test]
+fn test_disabled_select_branch_does_not_request_shutdown() {
+    pollster::block_on(async {
+        let (shutdown, guard) = new();
+        let watch = guard.watch();
+
+        tokio::select! {
+            _ = shutdown, if false => unreachable!(),
+            _ = std::future::ready(()) => {}
+        }
+
+        assert!(!watch.is_shutdown_requested());
+    });
 }
 
 #[test]
 fn test_watch_observes_shutdown_request() {
-    let (shutdown, guard) = new_pair();
+    let (shutdown, guard) = new();
     let watch = guard.watch();
     let handle = test_runtime().spawn(async move { watch.shutdown_requested().await });
     drop(guard);
 
-    pollster::block_on(shutdown.shutdown());
+    pollster::block_on(shutdown);
     pollster::block_on(handle).unwrap();
 }

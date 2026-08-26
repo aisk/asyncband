@@ -21,7 +21,7 @@ All notable changes to this project will be documented in this file.
 * Remove `Semaphore::try_acquire_and_forget`, `Semaphore::acquire_and_forget`, `Semaphore::try_acquire_owned_and_forget`, and `Semaphore::acquire_owned_and_forget`; acquire a permit and call its `forget` method instead.
 * Rename `oneshot::Sender::is_closed` and `oneshot::Receiver::is_closed` to `is_disconnected`.
 * Replace `Semaphore::forget` with `Semaphore::drain_permits` and `Semaphore::forget_exact` with `Semaphore::reduce_permits`; permit-level `forget` methods are unchanged.
-* Rename `ShutdownSend` and `ShutdownRecv` to `Shutdown` and `ShutdownGuard`; rename their operations to `request_shutdown`, `shutdown`, `wait`, `watch`, `into_watch`, `is_shutdown_requested`, `shutdown_requested`, and `shutdown_requested_owned`.
+* Rename `ShutdownSend` and `ShutdownRecv` to `Shutdown` and `ShutdownGuard`; rename `shutdown::new_pair` to `shutdown::new`; make `Shutdown` awaitable for requesting shutdown and awaiting completion; and rename the remaining operations to `request_shutdown`, `watch`, `into_watch`, `is_shutdown_requested`, `shutdown_requested`, and `shutdown_requested_owned`.
 * Raise the minimum supported Rust version from 1.85.0 to 1.86.0.
 
 ### Bug fixes
