@@ -24,8 +24,8 @@ use tests_integration::test_runtime;
 
 #[test]
 fn test_single_pair() {
-    let (shutdown, guard) = new_pair();
-    let handle = test_runtime().spawn(async move { guard.shutdown_requested().await });
+    let (shutdown, token) = new_pair();
+    let handle = test_runtime().spawn(async move { token.shutdown_requested().await });
     shutdown.request_shutdown();
     pollster::block_on(shutdown.wait_for_completion());
     pollster::block_on(handle).unwrap();
@@ -33,24 +33,24 @@ fn test_single_pair() {
 
 #[test]
 fn test_multiple_tasks() {
-    let (shutdown, guard) = new_pair();
+    let (shutdown, token) = new_pair();
     for _i in 0..100 {
-        let guard = guard.clone();
-        test_runtime().spawn(async move { guard.shutdown_requested().await });
+        let token = token.clone();
+        test_runtime().spawn(async move { token.shutdown_requested().await });
     }
-    drop(guard);
+    drop(token);
     shutdown.request_shutdown();
     pollster::block_on(shutdown.wait_for_completion());
 }
 
 #[test]
 fn test_multiple_control_handles() {
-    let (shutdown, guard) = new_pair();
+    let (shutdown, token) = new_pair();
     for _i in 0..100 {
-        let guard = guard.clone();
-        test_runtime().spawn(async move { guard.shutdown_requested().await });
+        let token = token.clone();
+        test_runtime().spawn(async move { token.shutdown_requested().await });
     }
-    drop(guard);
+    drop(token);
     let shutdown_clone = shutdown.clone();
     shutdown.request_shutdown();
     pollster::block_on(shutdown.wait_for_completion());
@@ -59,26 +59,26 @@ fn test_multiple_control_handles() {
 
 #[test]
 fn test_is_shutdown_requested() {
-    let (shutdown, guard) = new_pair();
-    assert!(!guard.is_shutdown_requested());
+    let (shutdown, token) = new_pair();
+    assert!(!token.is_shutdown_requested());
     shutdown.request_shutdown();
-    assert!(guard.is_shutdown_requested());
+    assert!(token.is_shutdown_requested());
 }
 
 #[test]
 fn test_shutdown_requested_owned_does_not_capture_self() {
     struct State {
-        guard: ShutdownGuard,
+        token: ShutdownToken,
     }
 
     async fn run_state(_state: &mut State) {
         pending::<()>().await;
     }
 
-    let (shutdown, guard) = new_pair();
-    let mut state = State { guard };
+    let (shutdown, token) = new_pair();
+    let mut state = State { token };
     test_runtime().spawn(async move {
-        let shutdown_requested = state.guard.shutdown_requested_owned();
+        let shutdown_requested = state.token.shutdown_requested_owned();
         tokio::select! {
             _ = shutdown_requested => (),
             _ = run_state(&mut state) => (),
@@ -89,36 +89,36 @@ fn test_shutdown_requested_owned_does_not_capture_self() {
 }
 
 #[test]
-fn test_watcher_does_not_block_completion() {
-    let (shutdown, guard) = new_pair();
-    let watcher = guard.into_watcher();
+fn test_watch_does_not_block_completion() {
+    let (shutdown, token) = new_pair();
+    let watch = token.into_watch();
 
     shutdown.request_shutdown();
-    assert!(watcher.is_shutdown_requested());
+    assert!(watch.is_shutdown_requested());
     pollster::block_on(shutdown.wait_for_completion());
 }
 
 #[test]
 fn test_wait_for_completion_does_not_request_shutdown() {
-    let (shutdown, guard) = new_pair();
-    let watcher = guard.watcher();
+    let (shutdown, token) = new_pair();
+    let watch = token.watch();
     let completion = shutdown.wait_for_completion();
     let mut completion = pin!(completion);
 
     assert!(poll_once(completion.as_mut()).is_pending());
-    assert!(!watcher.is_shutdown_requested());
+    assert!(!watch.is_shutdown_requested());
 
-    drop(guard);
+    drop(token);
     assert!(poll_once(completion.as_mut()).is_ready());
-    assert!(!watcher.is_shutdown_requested());
+    assert!(!watch.is_shutdown_requested());
 }
 
 #[test]
-fn test_watcher_observes_shutdown_request() {
-    let (shutdown, guard) = new_pair();
-    let watcher = guard.watcher();
-    let handle = test_runtime().spawn(async move { watcher.shutdown_requested().await });
-    drop(guard);
+fn test_watch_observes_shutdown_request() {
+    let (shutdown, token) = new_pair();
+    let watch = token.watch();
+    let handle = test_runtime().spawn(async move { watch.shutdown_requested().await });
+    drop(token);
 
     shutdown.request_shutdown();
     pollster::block_on(shutdown.wait_for_completion());
