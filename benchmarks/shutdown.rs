@@ -31,26 +31,26 @@ fn signal_and_join(bencher: Bencher, receiver_count: usize) {
     let mut context = bench_context();
 
     bencher.bench_local(|| {
-        let (sender, receiver) = shutdown::new_pair();
-        let receivers = (0..receiver_count)
-            .map(|_| receiver.clone())
+        let (shutdown, guard) = shutdown::new_pair();
+        let guards = (0..receiver_count)
+            .map(|_| guard.clone())
             .collect::<Vec<_>>();
-        drop(receiver);
+        drop(guard);
 
-        let mut waits = receivers
+        let mut waits = guards
             .iter()
-            .map(|receiver| Box::pin(receiver.is_shutdown()))
+            .map(|guard| Box::pin(guard.shutdown_requested()))
             .collect::<Vec<_>>();
         for wait in &mut waits {
             poll_pending(wait.as_mut(), &mut context);
         }
 
-        sender.shutdown();
+        shutdown.request_shutdown();
         for mut wait in waits {
             poll_pinned_ready(wait.as_mut(), &mut context);
         }
-        drop(receivers);
-        poll_ready(sender.await_shutdown(), &mut context);
+        drop(guards);
+        poll_ready(shutdown.wait_for_completion(), &mut context);
         black_box(())
     });
 }
