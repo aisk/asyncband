@@ -37,7 +37,7 @@ use asyncband::rwlock::RwLockReadGuard;
 use asyncband::rwlock::RwLockWriteGuard;
 use asyncband::semaphore::Semaphore;
 use asyncband::shutdown::Shutdown;
-use asyncband::shutdown::ShutdownToken;
+use asyncband::shutdown::ShutdownGuard;
 use asyncband::shutdown::ShutdownWatch;
 use asyncband::singleflight;
 use asyncband::waitgroup::Wait;
@@ -76,7 +76,7 @@ fn public_types_are_send_and_sync() {
     assert_send_and_sync::<Latch>();
     assert_send_and_sync::<Semaphore>();
     assert_send_and_sync::<Shutdown>();
-    assert_send_and_sync::<ShutdownToken>();
+    assert_send_and_sync::<ShutdownGuard>();
     assert_send_and_sync::<ShutdownWatch>();
     assert_send_and_sync::<WaitGroup>();
     assert_send_and_sync::<Mutex<i64>>();
@@ -123,7 +123,7 @@ fn public_types_are_unpin() {
     assert_unpin::<singleflight::Group<String, u32>>();
     assert_unpin::<Semaphore>();
     assert_unpin::<Shutdown>();
-    assert_unpin::<ShutdownToken>();
+    assert_unpin::<ShutdownGuard>();
     assert_unpin::<ShutdownWatch>();
     assert_unpin::<WaitGroup>();
     assert_unpin::<Wait>();
