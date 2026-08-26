@@ -21,9 +21,9 @@ use std::hash::Hash;
 use std::hash::RandomState;
 use std::sync::Arc;
 
-use crate::internal::mutex::Mutex;
 use crate::internal::once_table::OnceTable;
 use crate::internal::once_table::OnceTableEntry;
+use crate::internal::rwlock::RwLock;
 
 #[cfg(test)]
 mod tests;
@@ -34,7 +34,7 @@ mod tests;
 /// to wrap the `V` in an `Arc<V>` to make cloning cheap.
 #[derive(Debug)]
 pub struct OnceMap<K, V, S = RandomState> {
-    map: Mutex<OnceTable<K, V, S>>,
+    map: RwLock<OnceTable<K, V, S>>,
 }
 
 // Holds one call's entry so Drop can clean it up if the computation is abandoned.
@@ -78,9 +78,12 @@ where
             return;
         };
 
-        let mut table = self.once_map.map.lock();
+        let mut table = self.once_map.map.write();
         // If the table still owns this entry, a count of two means the current call is its only
-        // owner outside the table. remove_entry rejects an entry that was detached or replaced.
+        // owner outside the table: entries are only cloned out of the table under the table lock,
+        // so the write lock excludes new owners while the count is checked, and owners that
+        // release outside the lock do so only after the cell is initialized or the entry was
+        // detached. remove_entry rejects an entry that was detached or replaced.
         if Arc::strong_count(&entry) == 2 && !entry.initialized() {
             table.remove_entry(&entry);
         }
@@ -109,14 +112,14 @@ where
     /// Creates a new OnceMap with the default hasher.
     pub fn new() -> Self {
         Self {
-            map: Mutex::new(OnceTable::with_hasher(RandomState::new())),
+            map: RwLock::new(OnceTable::with_hasher(RandomState::new())),
         }
     }
 
     /// Creates a new OnceMap with the default hasher and the specified capacity.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            map: Mutex::new(OnceTable::with_capacity_and_hasher(
+            map: RwLock::new(OnceTable::with_capacity_and_hasher(
                 capacity,
                 RandomState::new(),
             )),
@@ -133,15 +136,29 @@ where
     /// Creates a new OnceMap with the given hasher.
     pub fn with_hasher(hasher: S) -> Self {
         Self {
-            map: Mutex::new(OnceTable::with_hasher(hasher)),
+            map: RwLock::new(OnceTable::with_hasher(hasher)),
         }
     }
 
     /// Create a OnceMap with the specified capacity and hasher.
     pub fn with_capacity_and_hasher(capacity: usize, hasher: S) -> Self {
         Self {
-            map: Mutex::new(OnceTable::with_capacity_and_hasher(capacity, hasher)),
+            map: RwLock::new(OnceTable::with_capacity_and_hasher(capacity, hasher)),
         }
+    }
+
+    // Looks the key up under the read lock so initialized hits and duplicate waiters stay off the
+    // exclusive lock, and inserts under the write lock only when the key is absent.
+    fn compute_entry(&self, key: K) -> Arc<OnceTableEntry<K, V>> {
+        {
+            let map = self.map.read();
+            if let Some(entry) = map.get(&key) {
+                return Arc::clone(entry);
+            }
+        }
+
+        let mut map = self.map.write();
+        Arc::clone(map.get_or_insert(key))
     }
 
     /// Compute the value for the given key if absent.
@@ -155,14 +172,10 @@ where
     where
         F: AsyncFnOnce() -> V,
     {
-        let entry = {
-            let mut map = self.map.lock();
-            let entry = map.get_or_insert(key);
-            if let Some(value) = entry.get() {
-                return value.clone();
-            }
-            Arc::clone(entry)
-        };
+        let entry = self.compute_entry(key);
+        if let Some(value) = entry.get() {
+            return value.clone();
+        }
 
         let guard = ComputeCleanupGuard::new(self, entry);
         let result = guard.entry().get_or_init(func).await.clone();
@@ -181,14 +194,10 @@ where
     where
         F: AsyncFnOnce() -> Result<V, E>,
     {
-        let entry = {
-            let mut map = self.map.lock();
-            let entry = map.get_or_insert(key);
-            if let Some(value) = entry.get() {
-                return Ok(value.clone());
-            }
-            Arc::clone(entry)
-        };
+        let entry = self.compute_entry(key);
+        if let Some(value) = entry.get() {
+            return Ok(value.clone());
+        }
 
         let guard = ComputeCleanupGuard::new(self, entry);
         let result = guard.entry().get_or_try_init(func).await?.clone();
@@ -202,7 +211,7 @@ where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        let map = self.map.lock();
+        let map = self.map.read();
         let entry = map.get(key)?;
         entry.get().cloned()
     }
@@ -217,7 +226,7 @@ where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        let mut map = self.map.lock();
+        let mut map = self.map.write();
         map.remove(key);
     }
 
@@ -232,7 +241,7 @@ where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        let entry = self.map.lock().remove(key)?;
+        let entry = self.map.write().remove(key)?;
         entry.get().cloned()
     }
 }
@@ -250,7 +259,7 @@ where
         }
 
         Self {
-            map: Mutex::new(map),
+            map: RwLock::new(map),
         }
     }
 }

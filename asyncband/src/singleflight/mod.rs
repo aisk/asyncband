@@ -23,9 +23,9 @@ use std::hash::Hash;
 use std::hash::RandomState;
 use std::sync::Arc;
 
-use crate::internal::mutex::Mutex;
 use crate::internal::once_table::OnceTable;
 use crate::internal::once_table::OnceTableEntry;
+use crate::internal::rwlock::RwLock;
 
 #[cfg(test)]
 mod tests;
@@ -34,7 +34,7 @@ mod tests;
 /// units of work can be executed with duplicate suppression.
 #[derive(Debug)]
 pub struct Group<K, V, S = RandomState> {
-    map: Mutex<OnceTable<K, V, S>>,
+    map: RwLock<OnceTable<K, V, S>>,
 }
 
 // Holds one call's entry so Drop can clean it up if the work is abandoned.
@@ -53,9 +53,15 @@ where
     S: BuildHasher,
 {
     fn new(group: &'a Group<K, V, S>, key: K) -> Self {
+        // Looks the key up under the read lock so duplicate waiters stay off the exclusive lock,
+        // and inserts under the write lock only when no call is in flight for the key.
         let entry = {
-            let mut map = group.map.lock();
-            Arc::clone(map.get_or_insert(key))
+            let map = group.map.read();
+            map.get(&key).map(Arc::clone)
+        };
+        let entry = match entry {
+            Some(entry) => entry,
+            None => Arc::clone(group.map.write().get_or_insert(key)),
         };
 
         Self {
@@ -83,9 +89,12 @@ where
             return;
         };
 
-        let mut table = self.group.map.lock();
+        let mut table = self.group.map.write();
         // If the table still owns this entry, a count of two means the current call is its only
-        // owner outside the table. remove_entry rejects an entry that was detached or replaced.
+        // owner outside the table: entries are only cloned out of the table under the table lock,
+        // so the write lock excludes new owners while the count is checked, and owners that
+        // release outside the lock do so only after the cell is initialized or the entry was
+        // detached. remove_entry rejects an entry that was detached or replaced.
         if Arc::strong_count(&entry) == 2 && !entry.initialized() {
             table.remove_entry(&entry);
         }
@@ -114,7 +123,7 @@ where
     /// Creates a new Group with the default hasher.
     pub fn new() -> Self {
         Self {
-            map: Mutex::new(OnceTable::with_hasher(RandomState::new())),
+            map: RwLock::new(OnceTable::with_hasher(RandomState::new())),
         }
     }
 }
@@ -128,7 +137,7 @@ where
     /// Creates a new Group with the given hasher.
     pub fn with_hasher(hasher: S) -> Self {
         Self {
-            map: Mutex::new(OnceTable::with_hasher(hasher)),
+            map: RwLock::new(OnceTable::with_hasher(hasher)),
         }
     }
 
@@ -193,7 +202,7 @@ where
         let result = entry
             .get_or_init(async || {
                 let result = func().await;
-                self.map.lock().remove_entry(entry);
+                self.map.write().remove_entry(entry);
                 result
             })
             .await
@@ -257,7 +266,7 @@ where
         let result = entry
             .get_or_try_init(async || {
                 let result = func().await?;
-                self.map.lock().remove_entry(entry);
+                self.map.write().remove_entry(entry);
                 Ok(result)
             })
             .await?
@@ -275,7 +284,7 @@ where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        let mut map = self.map.lock();
+        let mut map = self.map.write();
         map.remove(key);
     }
 }

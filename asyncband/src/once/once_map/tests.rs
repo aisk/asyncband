@@ -29,7 +29,7 @@ async fn failed_compute_removes_empty_entry() {
     let result: Result<i32, &str> = map.try_compute("key", async || Err("fail")).await;
 
     assert_eq!(result, Err("fail"));
-    assert!(map.map.lock().is_empty());
+    assert!(map.map.read().is_empty());
 }
 
 #[tokio::test]
@@ -46,7 +46,7 @@ async fn panicked_compute_removes_empty_entry() {
     });
 
     assert!(task.await.unwrap_err().is_panic());
-    assert!(map.map.lock().is_empty());
+    assert!(map.map.read().is_empty());
 }
 
 #[tokio::test]
@@ -65,11 +65,78 @@ async fn cancelled_compute_removes_empty_entry() {
     });
 
     started_rx.await.unwrap();
-    assert_eq!(map.map.lock().len(), 1);
+    assert_eq!(map.map.read().len(), 1);
 
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
-    assert!(map.map.lock().is_empty());
+    assert!(map.map.read().is_empty());
+}
+
+#[tokio::test]
+async fn cancelled_waiter_preserves_pending_entry() {
+    let map = OnceMap::<&str, i32>::new();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+
+    let leader = map.compute("key", async move || {
+        release_rx.await.unwrap();
+        1
+    });
+    tokio::pin!(leader);
+    assert!(poll_once(leader.as_mut()).is_pending());
+
+    let mut waiter = Box::pin(map.compute("key", async || unreachable!()));
+    assert!(poll_once(waiter.as_mut()).is_pending());
+    drop(waiter);
+
+    assert_eq!(map.map.read().len(), 1);
+
+    release_tx.send(()).unwrap();
+    assert_eq!(leader.await, 1);
+    assert_eq!(map.get("key"), Some(1));
+}
+
+#[tokio::test]
+async fn cancelled_waiter_preserves_initialized_entry() {
+    let map = OnceMap::<&str, i32>::new();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+
+    let leader = map.compute("key", async move || {
+        release_rx.await.unwrap();
+        1
+    });
+    tokio::pin!(leader);
+    assert!(poll_once(leader.as_mut()).is_pending());
+
+    let mut waiter = Box::pin(map.compute("key", async || unreachable!()));
+    assert!(poll_once(waiter.as_mut()).is_pending());
+
+    release_tx.send(()).unwrap();
+    assert_eq!(leader.await, 1);
+
+    drop(waiter);
+
+    assert_eq!(map.map.read().len(), 1);
+    assert_eq!(map.get("key"), Some(1));
+}
+
+#[tokio::test]
+async fn cancelled_compute_preserves_replacement_entry() {
+    let map = OnceMap::<&str, i32>::new();
+    let (_release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let mut first = Box::pin(map.compute("key", async move || {
+        release_rx.await.unwrap();
+        1
+    }));
+    assert!(poll_once(first.as_mut()).is_pending());
+
+    map.discard("key");
+    assert_eq!(map.compute("key", async || 2).await, 2);
+
+    drop(first);
+
+    assert_eq!(map.map.read().len(), 1);
+    assert_eq!(map.get("key"), Some(2));
 }
 
 #[tokio::test]
@@ -91,7 +158,7 @@ async fn failed_compute_preserves_entry_for_waiter_retry() {
     release_tx.send(()).unwrap();
     assert_eq!(first.await, Err("fail"));
 
-    assert_eq!(map.map.lock().len(), 1);
+    assert_eq!(map.map.read().len(), 1);
     assert_eq!(retry.await, Ok(1));
     assert_eq!(map.get("key"), Some(1));
 }

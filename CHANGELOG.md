@@ -23,6 +23,7 @@ All notable changes to this project will be documented in this file.
 * Replace `Semaphore::forget` with `Semaphore::drain_permits` and `Semaphore::forget_exact` with `Semaphore::reduce_permits`; permit-level `forget` methods are unchanged.
 * Rename `ShutdownSend` and `ShutdownRecv` to `Shutdown` and `ShutdownGuard`; rename `shutdown::new_pair` to `shutdown::new`; make `Shutdown` awaitable for requesting shutdown and awaiting completion; and rename the remaining operations to `request_shutdown`, `watch`, `into_watch`, `is_shutdown_requested`, `shutdown_requested`, and `shutdown_requested_owned`.
 * Raise the minimum supported Rust version from 1.85.0 to 1.86.0.
+* Require the hasher to be `Sync` for `OnceMap` and `singleflight::Group` to be `Sync`; lookups now hash keys under a shared read lock, so concurrent readers share the hasher. The default `RandomState` and other common hashers are unaffected.
 
 ### Bug fixes
 
@@ -31,3 +32,4 @@ All notable changes to this project will be documented in this file.
 ### Improvements
 
 * Remove the `slab` dependency in favor of a focused internal waiter arena.
+* Serve `OnceMap` and `singleflight::Group` lookups for initialized hits and duplicate waiters under a shared read lock instead of the exclusive table lock, so concurrent lookups no longer serialize.

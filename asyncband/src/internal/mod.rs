@@ -61,6 +61,9 @@ pub(crate) mod value_cell;
 ))]
 pub(crate) mod mutex;
 
+#[cfg(any(feature = "once-map", feature = "singleflight"))]
+pub(crate) mod rwlock;
+
 #[cfg(any(
     feature = "mpsc",
     feature = "mutex",

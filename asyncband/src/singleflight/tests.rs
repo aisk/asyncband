@@ -36,7 +36,7 @@ async fn panicked_work_removes_empty_entry() {
     });
 
     assert!(task.await.unwrap_err().is_panic());
-    assert!(group.map.lock().is_empty());
+    assert!(group.map.read().is_empty());
 
     let result = group.work("key", || async { "success".to_owned() }).await;
     assert_eq!(result, "success");
@@ -58,11 +58,63 @@ async fn cancelled_work_removes_empty_entry() {
     });
 
     started_rx.await.unwrap();
-    assert_eq!(group.map.lock().len(), 1);
+    assert_eq!(group.map.read().len(), 1);
 
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
-    assert!(group.map.lock().is_empty());
+    assert!(group.map.read().is_empty());
+}
+
+#[tokio::test]
+async fn cancelled_waiter_preserves_inflight_entry() {
+    let group = Group::<&str, i32>::new();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+
+    let leader = group.work("key", || async move {
+        release_rx.await.unwrap();
+        1
+    });
+    tokio::pin!(leader);
+    assert!(poll_once(leader.as_mut()).is_pending());
+
+    let mut waiter = Box::pin(group.work("key", || async { unreachable!() }));
+    assert!(poll_once(waiter.as_mut()).is_pending());
+    drop(waiter);
+
+    assert_eq!(group.map.read().len(), 1);
+
+    release_tx.send(()).unwrap();
+    assert_eq!(leader.await, 1);
+    assert!(group.map.read().is_empty());
+}
+
+#[tokio::test]
+async fn cancelled_work_preserves_replacement_entry() {
+    let group = Group::<&str, i32>::new();
+    let (_release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let (replacement_tx, replacement_rx) = tokio::sync::oneshot::channel();
+
+    let mut first = Box::pin(group.work("key", || async move {
+        release_rx.await.unwrap();
+        1
+    }));
+    assert!(poll_once(first.as_mut()).is_pending());
+
+    group.forget("key");
+
+    let second = group.work("key", || async move {
+        replacement_rx.await.unwrap();
+        2
+    });
+    tokio::pin!(second);
+    assert!(poll_once(second.as_mut()).is_pending());
+
+    drop(first);
+    assert_eq!(group.map.read().len(), 1);
+
+    replacement_tx.send(()).unwrap();
+    assert_eq!(second.await, 2);
+    assert!(group.map.read().is_empty());
 }
 
 #[tokio::test]
@@ -73,7 +125,7 @@ async fn failed_try_work_removes_empty_entry() {
         .try_work("key", || async { Err::<&str, &str>("error") })
         .await;
     assert_eq!(result, Err("error"));
-    assert!(group.map.lock().is_empty());
+    assert!(group.map.read().is_empty());
 
     let retry = group
         .try_work("key", || async { Ok::<&str, ()>("success") })
@@ -100,7 +152,7 @@ async fn failed_try_work_preserves_entry_for_waiter_retry() {
     release_tx.send(()).unwrap();
     assert_eq!(first.await, Err("fail"));
 
-    assert_eq!(group.map.lock().len(), 1);
+    assert_eq!(group.map.read().len(), 1);
     assert_eq!(retry.await, Ok("success"));
-    assert!(group.map.lock().is_empty());
+    assert!(group.map.read().is_empty());
 }
