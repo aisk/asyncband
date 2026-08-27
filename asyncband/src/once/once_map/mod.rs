@@ -93,6 +93,13 @@ where
     }
 }
 
+// Outcome of looking a key up for compute: an initialized entry resolves to its value while the
+// table lock is still held, so contended hits never touch the entry's shared reference count.
+enum ComputeLookup<K, V> {
+    Hit(V),
+    Pending(Arc<OnceTableEntry<K, V>>),
+}
+
 impl<K, V, S> Default for OnceMap<K, V, S>
 where
     K: Eq + Hash,
@@ -149,16 +156,23 @@ where
 
     // Looks the key up under the read lock so initialized hits and duplicate waiters stay off the
     // exclusive lock, and inserts under the write lock only when the key is absent.
-    fn compute_entry(&self, key: K) -> Arc<OnceTableEntry<K, V>> {
+    fn compute_entry(&self, key: K) -> ComputeLookup<K, V> {
         {
             let map = self.map.read();
             if let Some(entry) = map.get(&key) {
-                return Arc::clone(entry);
+                if let Some(value) = entry.get() {
+                    return ComputeLookup::Hit(value.clone());
+                }
+                return ComputeLookup::Pending(Arc::clone(entry));
             }
         }
 
         let mut map = self.map.write();
-        Arc::clone(map.get_or_insert(key))
+        let entry = map.get_or_insert(key);
+        if let Some(value) = entry.get() {
+            return ComputeLookup::Hit(value.clone());
+        }
+        ComputeLookup::Pending(Arc::clone(entry))
     }
 
     /// Compute the value for the given key if absent.
@@ -172,10 +186,10 @@ where
     where
         F: AsyncFnOnce() -> V,
     {
-        let entry = self.compute_entry(key);
-        if let Some(value) = entry.get() {
-            return value.clone();
-        }
+        let entry = match self.compute_entry(key) {
+            ComputeLookup::Hit(value) => return value,
+            ComputeLookup::Pending(entry) => entry,
+        };
 
         let guard = ComputeCleanupGuard::new(self, entry);
         let result = guard.entry().get_or_init(func).await.clone();
@@ -194,10 +208,10 @@ where
     where
         F: AsyncFnOnce() -> Result<V, E>,
     {
-        let entry = self.compute_entry(key);
-        if let Some(value) = entry.get() {
-            return Ok(value.clone());
-        }
+        let entry = match self.compute_entry(key) {
+            ComputeLookup::Hit(value) => return Ok(value),
+            ComputeLookup::Pending(entry) => entry,
+        };
 
         let guard = ComputeCleanupGuard::new(self, entry);
         let result = guard.entry().get_or_try_init(func).await?.clone();
