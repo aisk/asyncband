@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use crate::internal::once_table::OnceTable;
 use crate::internal::once_table::OnceTableEntry;
+use crate::internal::once_table::OnceTableLookup;
 
 #[cfg(test)]
 mod tests;
@@ -143,10 +144,10 @@ where
     where
         F: AsyncFnOnce() -> V,
     {
-        let entry = self.map.get_or_insert(key);
-        if let Some(value) = entry.get() {
-            return value.clone();
-        }
+        let entry = match self.map.lookup_or_insert(key) {
+            OnceTableLookup::Hit(value) => return value,
+            OnceTableLookup::Pending(entry) => entry,
+        };
 
         let guard = ComputeCleanupGuard::new(self, entry);
         let result = guard.entry().get_or_init(func).await.clone();
@@ -165,10 +166,10 @@ where
     where
         F: AsyncFnOnce() -> Result<V, E>,
     {
-        let entry = self.map.get_or_insert(key);
-        if let Some(value) = entry.get() {
-            return Ok(value.clone());
-        }
+        let entry = match self.map.lookup_or_insert(key) {
+            OnceTableLookup::Hit(value) => return Ok(value),
+            OnceTableLookup::Pending(entry) => entry,
+        };
 
         let guard = ComputeCleanupGuard::new(self, entry);
         let result = guard.entry().get_or_try_init(func).await?.clone();
@@ -182,8 +183,7 @@ where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        let entry = self.map.get(key)?;
-        entry.get().cloned()
+        self.map.get_value(key)
     }
 
     /// Remove the given key from the map.

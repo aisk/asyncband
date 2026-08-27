@@ -104,3 +104,55 @@ async fn failed_try_work_preserves_entry_for_waiter_retry() {
     assert_eq!(retry.await, Ok("success"));
     assert!(group.map.is_empty());
 }
+
+#[tokio::test]
+async fn cancelled_waiter_preserves_inflight_entry() {
+    let group = Group::<&str, i32>::new();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+
+    let leader = group.work("key", || async move {
+        release_rx.await.unwrap();
+        1
+    });
+    tokio::pin!(leader);
+    assert!(poll_once(leader.as_mut()).is_pending());
+
+    let mut waiter = Box::pin(group.work("key", || async { unreachable!() }));
+    assert!(poll_once(waiter.as_mut()).is_pending());
+    drop(waiter);
+
+    assert_eq!(group.map.len(), 1);
+
+    release_tx.send(()).unwrap();
+    assert_eq!(leader.await, 1);
+    assert!(group.map.is_empty());
+}
+
+#[tokio::test]
+async fn cancelled_work_preserves_replacement_entry() {
+    let group = Group::<&str, i32>::new();
+    let (_release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let (replacement_tx, replacement_rx) = tokio::sync::oneshot::channel();
+
+    let mut first = Box::pin(group.work("key", || async move {
+        release_rx.await.unwrap();
+        1
+    }));
+    assert!(poll_once(first.as_mut()).is_pending());
+
+    group.forget("key");
+
+    let second = group.work("key", || async move {
+        replacement_rx.await.unwrap();
+        2
+    });
+    tokio::pin!(second);
+    assert!(poll_once(second.as_mut()).is_pending());
+
+    drop(first);
+    assert_eq!(group.map.len(), 1);
+
+    replacement_tx.send(()).unwrap();
+    assert_eq!(second.await, 2);
+    assert!(group.map.is_empty());
+}

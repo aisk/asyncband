@@ -58,6 +58,19 @@ impl BuildHasher for LocalBuildHasher {
     }
 }
 
+// A hasher that is Send but not Sync. OnceMap and Group hash keys and pick shards outside the
+// exclusive lock, so being Sync requires the hasher to be Sync, while being Send does not.
+#[allow(dead_code)]
+struct SendOnlyState(std::marker::PhantomData<Cell<u64>>);
+
+impl BuildHasher for SendOnlyState {
+    type Hasher = DefaultHasher;
+
+    fn build_hasher(&self) -> Self::Hasher {
+        DefaultHasher::new()
+    }
+}
+
 impl ManageObject for PoolManager {
     type Object = i64;
     type Error = std::convert::Infallible;
@@ -117,6 +130,8 @@ fn movable_public_types_are_send() {
     fn assert_send<T: Send>() {}
 
     assert_send::<RwLockReadGuard<'_, std::sync::MutexGuard<'static, ()>>>();
+    assert_send::<OnceMap<String, u32, SendOnlyState>>();
+    assert_send::<singleflight::Group<String, u32, SendOnlyState>>();
     assert_send::<oneshot::Receiver<i64>>();
     assert_send::<oneshot::Recv<i64>>();
     assert_send::<pool::unbounded::Object<Cell<u8>>>();
